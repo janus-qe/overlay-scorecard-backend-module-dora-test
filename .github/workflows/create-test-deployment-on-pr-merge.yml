@@ -1,0 +1,87 @@
+name: Create Test Deployment on PR Merge
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+permissions:
+  contents: read
+  pull-requests: read
+  deployments: write
+
+jobs:
+  create-deployment:
+    if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'deployment-test')
+    runs-on: ubuntu-latest
+    outputs:
+      deployment_id: ${{ steps.create.outputs.deployment_id }}
+      deployment_state: ${{ steps.state.outputs.deployment_state }}
+    steps:
+      - name: Decide deployment status from labels
+        id: state
+        run: |
+          labels='${{ toJson(github.event.pull_request.labels.*.name) }}'
+          deployment_state="success"
+          for state in error failure inactive in_progress queued pending success; do
+            if echo "$labels" | grep -q "\"deployment-status-$state\""; then
+              deployment_state="$state"
+              break
+            fi
+          done
+          echo "deployment_state=$deployment_state" >> "$GITHUB_OUTPUT"
+
+      - name: Create test deployment (under dummy 'production' environment)
+        id: create
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const ref = context.payload.pull_request.merge_commit_sha || context.payload.pull_request.head.sha;
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref,
+              environment: "production",
+              auto_merge: false,
+              required_contexts: [],
+              transient_environment: true,
+              production_environment: false,
+              description: `Dummy production deployment for merged PR #${context.payload.pull_request.number}`
+            });
+            core.info(`Created deployment ${deployment.data.id} for ref ${ref}`);
+            core.setOutput("deployment_id", Number(deployment.data.id));
+
+  set-deployment-status:
+    needs: create-deployment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set deployment status
+        uses: actions/github-script@v8
+        env:
+          DEPLOYMENT_ID: ${{ needs.create-deployment.outputs.deployment_id }}
+          DEPLOYMENT_STATE: ${{ needs.create-deployment.outputs.deployment_state }}
+        with:
+          script: |
+            const deploymentId = process.env.DEPLOYMENT_ID;
+            const state = process.env.DEPLOYMENT_STATE;
+            const runUrl = context.serverUrl + "/" + context.repo.owner + "/" + context.repo.repo + "/actions/runs/" + context.runId;
+            if (!deploymentId) {
+              core.setFailed("Invalid deployment id: " + process.env.DEPLOYMENT_ID);
+              return;
+            }
+            if (!state) {
+              core.setFailed("Missing deployment state");
+              return;
+            }
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: deploymentId,
+              state,
+              log_url: runUrl,
+              environment_url: `https://example.com/dummy-production/${deploymentId}`,
+              description: `Dummy production deployment marked as ${state}`
+            });
+            core.notice(`Deployment ${deploymentId} marked as ${state}`);
