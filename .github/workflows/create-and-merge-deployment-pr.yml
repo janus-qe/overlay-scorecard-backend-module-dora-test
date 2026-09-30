@@ -22,72 +22,158 @@ on:
           - queued
           - pending
       merge_delay_minutes:
-        description: "How many minutes to wait before auto-merge"
-        required: true
-        default: 5
+        description: "How many minutes to wait before auto-merge of the deployment PR (max 55 minutes)"
+        required: false
+        default: 0
         type: number
       intermediary_pr_count:
-        description: "How many intermediary PRs to create and merge before deployment PR"
+        description: "How many intermediary PRs to create and merge before deployment PR (max 20)"
         required: true
         default: 0
         type: number
       intermediary_pr_open_minutes:
-        description: "How many minutes each intermediary PR should stay open before merge"
+        description: "How many minutes each intermediary PR should stay open before merge (PRs count * PR open minutes must be <= 40 minutes)"
         required: true
         default: 1
         type: number
+  workflow_call:
+    inputs:
+      auto_merge_deployment_pr:
+        description: "Automatically merge the final deployment PR"
+        required: false
+        default: true
+        type: boolean
+      deployment_status:
+        description: "Expected deployment status after PR merge"
+        required: false
+        default: success
+        type: string
+      merge_delay_minutes:
+        description: "How many minutes to wait before auto-merge of the deployment PR (max 55 minutes)"
+        required: false
+        default: 0
+        type: number
+      intermediary_pr_count:
+        description: "How many intermediary PRs to create and merge before deployment PR (max 20)"
+        required: false
+        default: 0
+        type: number
+      intermediary_pr_open_minutes:
+        description: "How many minutes each intermediary PR should stay open before merge (PRs count * PR open minutes must be <= 40 minutes)"
+        required: false
+        default: 1
+        type: number
+      run_label:
+        description: "Distinguish when one caller invokes this workflow more than once"
+        required: false
+        default: ""
+        type: string
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
 
 jobs:
   create-deployment-pr:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ github.token }}
-      BRANCH_NAME: test-deployment/${{ github.run_id }}-${{ github.run_attempt }}
+      BRANCH_NAME: test-deployment/${{ github.run_id }}-${{ github.run_attempt }}${{ inputs.run_label && format('-{0}', inputs.run_label) || '' }}
       FILE_NAME: deployment-simulations/latest.md
+      # How long an intermediary PR sleeps between the commits it pushes while open.
+      UPDATE_INTERVAL_SECONDS: 30
+      # Pause after the last push before merging so GitHub finishes computing mergeability.
+      MERGE_SETTLE_SECONDS: 3
     steps:
+      - name: Validate inputs
+        env:
+          INTERMEDIARY_PR_COUNT: ${{ inputs.intermediary_pr_count }}
+          INTERMEDIARY_PR_OPEN_MINUTES: ${{ inputs.intermediary_pr_open_minutes }}
+          MERGE_DELAY_MINUTES: ${{ inputs.merge_delay_minutes }}
+          DEPLOYMENT_STATUS: ${{ inputs.deployment_status }}
+          MAX_INTERMEDIARY_MINUTES: 40
+          MAX_FINAL_MERGE_MINUTES: 55
+          MAX_PR_COUNT: 20
+        run: |
+          fail=0
+
+          require_non_negative_integer() {
+            local name="$1"
+            local value="$2"
+            if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+              echo "::error::$name must be a non-negative integer. Got: $value"
+              fail=1
+            fi
+          }
+
+          require_non_negative_integer intermediary_pr_count "$INTERMEDIARY_PR_COUNT"
+          require_non_negative_integer intermediary_pr_open_minutes "$INTERMEDIARY_PR_OPEN_MINUTES"
+          if [ -n "$MERGE_DELAY_MINUTES" ]; then
+            require_non_negative_integer merge_delay_minutes "$MERGE_DELAY_MINUTES"
+          fi
+
+          # workflow_dispatch constrains this with a choice list, but workflow_call
+          # can only type it as a string, so callers get checked here instead.
+          case "$DEPLOYMENT_STATUS" in
+            error|success|failure|inactive|in_progress|queued|pending) ;;
+            *)
+              echo "::error::deployment_status must be one of error, success, failure, inactive, in_progress, queued, pending. Got: $DEPLOYMENT_STATUS"
+              fail=1
+              ;;
+          esac
+
+          if [ "$fail" -eq 1 ]; then
+            exit 1
+          fi
+
+          if [ "$INTERMEDIARY_PR_COUNT" -gt "$MAX_PR_COUNT" ]; then
+            echo "::error::pr_count is ${INTERMEDIARY_PR_COUNT}, which exceeds the maximum of ${MAX_PR_COUNT}."
+            exit 1
+          fi
+
+          intermediary_total_minutes=$((INTERMEDIARY_PR_COUNT * INTERMEDIARY_PR_OPEN_MINUTES))
+          if [ "$intermediary_total_minutes" -gt "$MAX_INTERMEDIARY_MINUTES" ]; then
+            echo "::error::intermediary_pr_count * intermediary_pr_open_minutes is ${intermediary_total_minutes} minute(s), which exceeds the maximum of ${MAX_INTERMEDIARY_MINUTES} minutes."
+            exit 1
+          fi
+
+          if [ -z "$MERGE_DELAY_MINUTES" ] || [ "$MERGE_DELAY_MINUTES" -eq 0 ]; then
+            echo "Deployment PR auto-merge delay: none requested, will wait ${MERGE_SETTLE_SECONDS}s."
+          elif [ "$MERGE_DELAY_MINUTES" -gt "$MAX_FINAL_MERGE_MINUTES" ]; then
+            echo "::error::merge_delay_minutes is ${MERGE_DELAY_MINUTES}, which exceeds the maximum of ${MAX_FINAL_MERGE_MINUTES} minutes."
+            exit 1
+          else
+            echo "Deployment PR auto-merge delay: ${MERGE_DELAY_MINUTES} minute(s)."
+          fi
+
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Configure git identity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Require merge token
-        if: ${{ inputs.intermediary_pr_count > 0 || inputs.auto_merge_deployment_pr }}
         env:
-          GH_MERGE_TOKEN: ${{ secrets.GH_MERGE_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
-          if [ -z "$GH_MERGE_TOKEN" ]; then
-            echo "Missing required secret GH_MERGE_TOKEN."
-            exit 1
-          fi
+          bot_user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
 
       - name: Create intermediary PRs and deployment PR
         id: prs
         env:
-          GH_MERGE_TOKEN: ${{ secrets.GH_MERGE_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           intermediary_pr_count="${{ inputs.intermediary_pr_count }}"
           intermediary_open_minutes="${{ inputs.intermediary_pr_open_minutes }}"
           action_run_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-          if ! [[ "$intermediary_pr_count" =~ ^[0-9]+$ ]]; then
-            echo "intermediary_pr_count must be a non-negative integer. Got: $intermediary_pr_count"
-            exit 1
-          fi
-
-          if ! [[ "$intermediary_open_minutes" =~ ^[0-9]+$ ]]; then
-            echo "intermediary_pr_open_minutes must be a non-negative integer. Got: $intermediary_open_minutes"
-            exit 1
-          fi
 
           create_branch_commit_and_pr() {
             local suffix="$1"
@@ -127,7 +213,7 @@ jobs:
             local branch_name="$2"
             local open_minutes="$3"
             local open_seconds=$((open_minutes * 60))
-            local update_interval_seconds=30
+            local update_interval_seconds="$UPDATE_INTERVAL_SECONDS"
             local update_count=$((open_seconds / update_interval_seconds))
 
             if [ "$open_seconds" -gt 0 ]; then
@@ -153,9 +239,9 @@ jobs:
               done
             fi
 
-            echo "Waiting 5s for mergeability checks to settle before merge."
-            sleep 5
-            GH_TOKEN="$GH_MERGE_TOKEN" gh pr merge "$pr_url" --squash --delete-branch
+            echo "Waiting ${MERGE_SETTLE_SECONDS}s for mergeability checks to settle before merge."
+            sleep "$MERGE_SETTLE_SECONDS"
+            gh pr merge "$pr_url" --squash --delete-branch
             echo "Merged intermediary PR: $pr_url"
           }
 
@@ -179,6 +265,8 @@ jobs:
           echo "Created deployment PR: $deployment_pr_url"
 
       - name: Ensure labels exist and assign deployment status labels
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           gh label create deployment-test --color 1d76db --description "PR is eligible for test deployment event" 2>/dev/null || true
           for state in error failure inactive in_progress queued pending success; do
@@ -191,6 +279,8 @@ jobs:
 
       - name: Wait until labels are visible on PR
         if: ${{ inputs.auto_merge_deployment_pr }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           pr_url="${{ steps.prs.outputs.deployment_pr_url }}"
           required_labels="deployment-test deployment-status-${{ inputs.deployment_status }}"
@@ -219,21 +309,31 @@ jobs:
 
       - name: Wait before auto-merge
         if: ${{ inputs.auto_merge_deployment_pr }}
+        env:
+          MERGE_DELAY_MINUTES: ${{ inputs.merge_delay_minutes }}
         run: |
-          delay_minutes="${{ inputs.merge_delay_minutes }}"
-          if ! [[ "$delay_minutes" =~ ^[0-9]+$ ]]; then
-            echo "merge_delay_minutes must be a non-negative integer. Got: $delay_minutes"
-            exit 1
+          if [ -z "$MERGE_DELAY_MINUTES" ] || [ "$MERGE_DELAY_MINUTES" -eq 0 ]; then
+            echo "No merge delay requested. Waiting ${MERGE_SETTLE_SECONDS}s before auto-merge..."
+            sleep "$MERGE_SETTLE_SECONDS"
+            exit 0
           fi
-          delay_seconds=$((delay_minutes * 60))
-          echo "Waiting $delay_minutes minute(s) before auto-merge..."
+
+          delay_seconds=$((MERGE_DELAY_MINUTES * 60))
+          echo "Waiting ${MERGE_DELAY_MINUTES} minute(s) before auto-merge..."
           sleep "$delay_seconds"
+
+      - name: Refresh GitHub App installation token
+        id: merge-token
+        if: ${{ inputs.auto_merge_deployment_pr }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
       - name: Auto-merge pull request
         if: ${{ inputs.auto_merge_deployment_pr }}
-        continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GH_MERGE_TOKEN }}
+          GH_TOKEN: ${{ steps.merge-token.outputs.token }}
         run: |
           gh pr merge "${{ steps.prs.outputs.deployment_pr_url }}" --squash --delete-branch
           echo "Requested merge for: ${{ steps.prs.outputs.deployment_pr_url }}"

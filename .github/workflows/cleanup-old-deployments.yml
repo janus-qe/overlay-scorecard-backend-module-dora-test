@@ -1,0 +1,113 @@
+name: Cleanup Old Deployments
+
+on:
+  schedule:
+    # Weekly, Sunday 04:00 UTC.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      older_than_days:
+        description: "Delete deployments created more than this many days ago"
+        required: true
+        default: 60
+        type: number
+      dry_run:
+        description: "Only list what would be deleted"
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: cleanup-old-deployments
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Delete deployments past the retention window
+        uses: actions/github-script@v8
+        env:
+          OLDER_THAN_DAYS: ${{ inputs.older_than_days || 60 }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const olderThanDays = Number(process.env.OLDER_THAN_DAYS);
+            const dryRun = process.env.DRY_RUN === "true";
+
+            if (!Number.isInteger(olderThanDays) || olderThanDays < 1) {
+              core.setFailed(`older_than_days must be a positive integer. Got: ${process.env.OLDER_THAN_DAYS}`);
+              return;
+            }
+
+            const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
+            core.info(`Deleting deployments created before ${new Date(cutoff).toISOString()}.`);
+
+            const deployments = await github.paginate(github.rest.repos.listDeployments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+
+            const stale = deployments.filter(d => new Date(d.created_at).getTime() < cutoff);
+            core.info(`Found ${deployments.length} deployment(s), ${stale.length} older than ${olderThanDays} day(s).`);
+
+            const deleted = [];
+            const failed = [];
+
+            for (const deployment of stale) {
+              const label = `#${deployment.id} (${deployment.environment}, created ${deployment.created_at})`;
+
+              if (dryRun) {
+                core.info(`Would delete ${label}`);
+                continue;
+              }
+
+              try {
+                // An active deployment cannot be deleted, so retire it first.
+                // Repeating this on an already inactive deployment is harmless.
+                await github.rest.repos.createDeploymentStatus({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  deployment_id: deployment.id,
+                  state: "inactive",
+                  description: `Retired by cleanup after ${olderThanDays} days`
+                });
+                await github.rest.repos.deleteDeployment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  deployment_id: deployment.id
+                });
+                deleted.push(label);
+                core.info(`Deleted ${label}`);
+              } catch (error) {
+                failed.push(`${label}: ${error.message}`);
+                core.warning(`Failed to delete ${label}: ${error.message}`);
+              }
+            }
+
+            await core.summary
+              .addHeading("Deployment cleanup", 3)
+              .addRaw(dryRun ? "Dry run, nothing was deleted.\n\n" : "\n")
+              .addTable([
+                [{ data: "Metric", header: true }, { data: "Count", header: true }],
+                ["Deployments seen", String(deployments.length)],
+                [`Older than ${olderThanDays} days`, String(stale.length)],
+                ["Deleted", String(deleted.length)],
+                ["Failed", String(failed.length)]
+              ])
+              .write();
+
+            if (failed.length > 0) {
+              core.setFailed(`Failed to delete ${failed.length} deployment(s):\n${failed.join("\n")}`);
+            }
