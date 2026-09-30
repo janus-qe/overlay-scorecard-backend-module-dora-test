@@ -10,7 +10,6 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  deployments: write
 
 jobs:
   create-deployment:
@@ -33,10 +32,18 @@ jobs:
           done
           echo "deployment_state=$deployment_state" >> "$GITHUB_OUTPUT"
 
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
       - name: Create test deployment (under dummy 'production' environment)
         id: create
         uses: actions/github-script@v8
         with:
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const ref = context.payload.pull_request.merge_commit_sha || context.payload.pull_request.head.sha;
             const deployment = await github.rest.repos.createDeployment({
@@ -57,12 +64,20 @@ jobs:
     needs: create-deployment
     runs-on: ubuntu-latest
     steps:
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
       - name: Set deployment status
         uses: actions/github-script@v8
         env:
           DEPLOYMENT_ID: ${{ needs.create-deployment.outputs.deployment_id }}
           DEPLOYMENT_STATE: ${{ needs.create-deployment.outputs.deployment_state }}
         with:
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const deploymentId = process.env.DEPLOYMENT_ID;
             const state = process.env.DEPLOYMENT_STATE;

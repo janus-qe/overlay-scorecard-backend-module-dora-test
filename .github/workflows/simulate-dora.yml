@@ -1,0 +1,68 @@
+name: Simulate DORA
+
+# Drives DORA scenario through create-and-merge-deployment-pr.yml:
+#
+#   segment 1   PR-A and PR-B merged, then a D1 deployment PR with status failure
+#   segment 2   PR-C merged (the fix), then a D2 deployment PR with status success
+#   segment 3   PR-D merged, then a D3 deployment PR with status success
+#
+# With the defaults below one DORA scenario run takes roughly 19 minutes.
+
+on:
+  schedule:
+    # Days 1, 5, 9, 13, 17, 21, 25 and 29 of each month at 03:00 UTC.
+    # Roughly 4 day cadence, the wrap into the next month is a shorter gap.
+    - cron: "0 3 */4 * *"
+  workflow_dispatch:
+    inputs:
+      pr_open_minutes:
+        description: "Minutes each PR stays open before it is merged"
+        required: true
+        default: 2
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: simulate-dora
+  cancel-in-progress: false
+
+jobs:
+  # PR-A, PR-B, then the failed deployment.
+  segment-1-failure:
+    uses: ./.github/workflows/create-and-merge-deployment-pr.yml
+    secrets: inherit
+    with:
+      run_label: seg1
+      intermediary_pr_count: 2
+      intermediary_pr_open_minutes: ${{ fromJSON(format('{0}', github.event_name == 'schedule' && 2 || inputs.pr_open_minutes)) }}
+      deployment_status: failure
+      merge_delay_minutes: ${{ fromJSON(format('{0}', github.event_name == 'schedule' && 2 || inputs.pr_open_minutes)) }}
+      auto_merge_deployment_pr: true
+
+  # PR-C is the fix, followed by the deployment that recovers from segment 1.
+  segment-2-recovery:
+    needs: segment-1-failure
+    uses: ./.github/workflows/create-and-merge-deployment-pr.yml
+    secrets: inherit
+    with:
+      run_label: seg2
+      intermediary_pr_count: 1
+      intermediary_pr_open_minutes: ${{ fromJSON(format('{0}', github.event_name == 'schedule' && 2 || inputs.pr_open_minutes)) }}
+      deployment_status: success
+      merge_delay_minutes: ${{ fromJSON(format('{0}', github.event_name == 'schedule' && 2 || inputs.pr_open_minutes)) }}
+      auto_merge_deployment_pr: true
+
+  # PR-D, then a clean deployment with no failure between it and the previous one.
+  segment-3-clean:
+    needs: segment-2-recovery
+    uses: ./.github/workflows/create-and-merge-deployment-pr.yml
+    secrets: inherit
+    with:
+      run_label: seg3
+      intermediary_pr_count: 1
+      intermediary_pr_open_minutes: ${{ fromJSON(format('{0}', github.event_name == 'schedule' && 2 || inputs.pr_open_minutes)) }}
+      deployment_status: success
+      merge_delay_minutes: ${{ fromJSON(format('{0}', github.event_name == 'schedule' && 2 || inputs.pr_open_minutes)) }}
+      auto_merge_deployment_pr: true

@@ -23,15 +23,22 @@ on:
 
 permissions:
   contents: read
-  deployments: write
 
 jobs:
   mark-status:
     runs-on: ubuntu-latest
     steps:
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
       - name: Mark deployment status
         uses: actions/github-script@v8
         with:
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const deploymentId = Number("${{ inputs.deployment_id }}");
             const status = "${{ inputs.status }}";
