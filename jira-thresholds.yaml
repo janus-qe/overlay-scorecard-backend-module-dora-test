@@ -1,0 +1,17 @@
+---
+# Component with Jira Scorecard only
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: jira-scorecard-only
+  annotations:
+    jira/project-key: RSPT
+    github.com/project-slug: janus-qe/overlay-scorecard-plugin-test
+    backstage.io/source-location: url:https://github.com/janus-qe/overlay-scorecard-plugin-test
+    scorecard.io/disabled-metrics: filecheck.readme,filecheck.license
+    scorecard.io/github.openPRs.thresholds.rules.warning: "10-100"
+    scorecard.io/jira.openIssues.thresholds.rules.error: ">100"
+spec:
+  type: service
+  owner: user:test1
+  lifecycle: production
