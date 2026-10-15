@@ -1,0 +1,16 @@
+---
+# Component with DORA Scorecard
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  title: Service 4
+  name: dora-scorecard4
+  annotations:
+    github.com/project-slug: janus-qe/overlay-scorecard-backend-module-dora-test
+    backstage.io/source-location: url:https://github.com/janus-qe/overlay-scorecard-backend-module-dora-test
+    scorecard.io/dora: "true"
+    jira/project-key: RHDHBUGS
+spec:
+  type: service
+  owner: user:test1
+  lifecycle: experimental
