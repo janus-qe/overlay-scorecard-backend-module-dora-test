@@ -16,3 +16,7 @@
 - intermediary_update_number: 3
 - intermediary_update_interval_seconds: 30
 - intermediary_update_at: 2026-10-25T08:08:31Z
+
+- intermediary_update_number: 4
+- intermediary_update_interval_seconds: 30
+- intermediary_update_at: 2026-10-25T08:09:03Z
