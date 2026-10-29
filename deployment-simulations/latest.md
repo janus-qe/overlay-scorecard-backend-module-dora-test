@@ -4,3 +4,7 @@
 - run_id: 40846955723
 - run_attempt: 1
 - created_at: 2026-10-29T09:08:21Z
+
+- intermediary_update_number: 1
+- intermediary_update_interval_seconds: 30
+- intermediary_update_at: 2026-10-29T09:08:54Z
